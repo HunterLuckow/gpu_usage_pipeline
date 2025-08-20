@@ -5,20 +5,22 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 
 
-# Import your GPU log generator and PySpark ingestion scripts
+# Import your GPU log generator and ingestion scripts
 from generate_gpu_logs import generate_logs
-# The Spark ingestion function will be implemented in phase 3
-# from spark_jobs.ingest_to_iceberg import ingest_to_iceberg
+from ingest import ingest_raw_data
+from aggregate import run_aggregation_pipeline
 
 def run_generate_logs():
     """Python callable to generate GPU logs."""
     generate_logs(hours=2)
 
 def run_ingest_to_iceberg():
-    """Python callable to ingest CSV logs into Iceberg via PySpark."""
-    # Placeholder until Phase 3 is implemented
-    print("Ingesting CSV logs into Iceberg...")
-    # Example: ingest_to_iceberg()  
+    """Python callable to ingest CSV logs into Iceberg."""
+    ingest_raw_data()
+
+def run_aggregate_usage():
+    """Python callable to aggregate GPU usage and compute billing."""
+    run_aggregation_pipeline()  
 
 # Define the DAG
 with DAG(
@@ -39,5 +41,10 @@ with DAG(
         python_callable=run_ingest_to_iceberg
     )
 
+    aggregate_usage_task = PythonOperator(
+        task_id="aggregate_usage",
+        python_callable=run_aggregate_usage
+    )
+
     # Define task dependencies
-    generate_logs_task >> ingest_to_iceberg_task
+    generate_logs_task >> ingest_to_iceberg_task >> aggregate_usage_task

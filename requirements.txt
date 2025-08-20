@@ -1,1 +1,2 @@
 pandas==2.3.0
+pyiceberg[s3fs,sql-sqlite]

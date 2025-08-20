@@ -15,7 +15,7 @@ def generate_logs(hours=1, interval_minutes=1):
     current_time = start_time
     while current_time <= end_time:
         record = {
-            "timestamp": current_time.isoformat(),
+            "timestamp": int(current_time.timestamp() * 1000),
             "node_id": random.randint(1, 5),  # Simulate 5 GPU nodes
             "gpu_id": random.randint(0, 3),   # Each node has 4 GPUs
             "usage_percent": round(random.uniform(0, 100), 2),

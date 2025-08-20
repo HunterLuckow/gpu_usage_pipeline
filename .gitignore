@@ -53,9 +53,19 @@ airflow/dags/__pycache__/
 airflow/config/airflow.cfg
 
 # Data files (generated during pipeline execution)
+data/iceberg/
+data/aggregates/
 data/raw/*.csv
 data/processed/
 data/temp/
+
+# Airflow data directories
+airflow/data/aggregates/
+airflow/data/iceberg/
+airflow/data/raw/
+airflow/logs/
+airflow/plugins/__pycache__/
+airflow/dags/__pycache__/
 
 # Docker
 .dockerignore
