@@ -12,7 +12,7 @@ from aggregate import run_aggregation_pipeline
 
 def run_generate_logs():
     """Python callable to generate GPU logs."""
-    generate_logs(hours=2)
+    generate_logs(hours=1)  # Changed from 2 to 1 to match hourly schedule
 
 def run_ingest_to_iceberg():
     """Python callable to ingest CSV logs into Iceberg."""

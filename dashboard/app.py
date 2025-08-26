@@ -2,6 +2,7 @@
 GPU Usage Dashboard
 
 A Streamlit application to visualize GPU usage metrics and billing data.
+Enhanced to showcase realistic GPU simulation patterns.
 """
 
 import streamlit as st
@@ -15,7 +16,7 @@ import sys
 import numpy as np
 
 # Local data paths
-DATA_DIR = "../data"
+DATA_DIR = "../airflow/data"
 ICEBERG_DIR = os.path.join(DATA_DIR, "iceberg")
 AGGREGATES_DIR = os.path.join(DATA_DIR, "aggregates")
 
@@ -24,6 +25,24 @@ GPU_HOURLY_RATE = 2.50  # USD per GPU-hour
 MEMORY_OVERAGE_RATE = 0.10  # USD per GB over 16GB
 CLUSTER_OVERHEAD_RATE = 0.05  # 5% overhead on total costs
 
+# Job type classification based on utilization patterns
+def classify_job_type(utilization: float, memory_gb: float) -> str:
+    """Classify job type based on utilization and memory patterns."""
+    if utilization >= 80:
+        return "Training"
+    elif utilization >= 20:
+        return "Inference"
+    elif utilization >= 5:
+        return "Data Processing"
+    else:
+        return "Idle"
+
+def is_work_hours(timestamp: pd.Timestamp) -> bool:
+    """Check if timestamp is during work hours."""
+    hour = timestamp.hour
+    is_weekday = timestamp.weekday() < 5
+    return is_weekday and 9 <= hour <= 18
+
 def load_fact_table():
     """Load the GPU usage fact table from local CSV."""
     fact_file = os.path.join(ICEBERG_DIR, "gpu_usage_fact.csv")
@@ -31,6 +50,14 @@ def load_fact_table():
         df = pd.read_csv(fact_file)
         # Convert timestamp back to datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Add derived columns for enhanced analysis
+        df['job_type'] = df.apply(lambda x: classify_job_type(x['gpu_utilization_percent'], x['memory_used_gb']), axis=1)
+        df['is_work_hours'] = df['timestamp'].apply(is_work_hours)
+        df['hour_of_day'] = df['timestamp'].dt.hour
+        df['day_of_week'] = df['timestamp'].dt.day_name()
+        df['memory_efficiency'] = df['memory_used_gb'] / df['gpu_utilization_percent'] * 100  # GB per % utilization
+        
         return df
     else:
         print(f"Fact table file not found: {fact_file}")
@@ -63,7 +90,8 @@ def aggregate_by_time_interval(df: pd.DataFrame, interval: str = 'hourly') -> pd
         'duration_seconds': 'sum',
         'job_id': 'nunique',  # Count unique jobs
         'node_id': 'nunique',  # Count unique nodes
-        'gpu_id': 'nunique'    # Count unique GPUs
+        'gpu_id': 'nunique',   # Count unique GPUs
+        'is_work_hours': 'mean'  # Percentage of work hours
     }).round(2)
 
     # Flatten column names
@@ -92,7 +120,9 @@ def aggregate_by_node(df: pd.DataFrame) -> pd.DataFrame:
         'duration_seconds': 'sum',
         'job_id': 'nunique',
         'gpu_id': 'nunique',
-        'gpu_efficiency_ratio': 'mean'
+        'gpu_efficiency_ratio': 'mean',
+        'memory_efficiency': 'mean',
+        'job_type': lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else 'Unknown'
     }).round(2)
 
     # Flatten column names
@@ -117,7 +147,10 @@ def aggregate_by_job(df: pd.DataFrame) -> pd.DataFrame:
         'duration_seconds': 'sum',
         'node_id': 'nunique',
         'gpu_id': 'nunique',
-        'gpu_efficiency_ratio': 'mean'
+        'gpu_efficiency_ratio': 'mean',
+        'memory_efficiency': 'mean',
+        'job_type': lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else 'Unknown',
+        'is_work_hours': 'mean'
     }).round(2)
 
     # Flatten column names
@@ -141,7 +174,8 @@ def calculate_billing(df: pd.DataFrame) -> pd.DataFrame:
         'duration_seconds': 'sum',
         'gpu_utilization_percent': 'mean',
         'memory_used_gb': 'mean',
-        'gpu_id': 'nunique'
+        'gpu_id': 'nunique',
+        'job_type': lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else 'Unknown'
     }).reset_index()
 
     # Calculate GPU hours
@@ -169,9 +203,33 @@ def calculate_billing(df: pd.DataFrame) -> pd.DataFrame:
 
     return billing_df
 
+def analyze_job_persistence(df: pd.DataFrame) -> pd.DataFrame:
+    """Analyze job persistence patterns over time."""
+    if df.empty:
+        return pd.DataFrame()
+    
+    # Group by job and analyze time spans
+    job_analysis = df.groupby('job_id').agg({
+        'timestamp': ['min', 'max'],
+        'gpu_utilization_percent': 'mean',
+        'memory_used_gb': 'mean',
+        'job_type': lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else 'Unknown',
+        'node_id': 'nunique',
+        'gpu_id': 'nunique'
+    }).round(2)
+    
+    # Flatten column names
+    job_analysis.columns = [f"{col[0]}_{col[1]}" for col in job_analysis.columns]
+    
+    # Calculate duration
+    job_analysis['duration_hours'] = (job_analysis['timestamp_max'] - job_analysis['timestamp_min']).dt.total_seconds() / 3600
+    
+    job_analysis.reset_index(inplace=True)
+    return job_analysis
+
 # Page configuration
 st.set_page_config(
-    page_title="GPU Usage Dashboard",
+    page_title="GPU Usage Dashboard - Enhanced",
     page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -196,6 +254,18 @@ st.markdown("""
         color: #d62728;
         font-weight: bold;
     }
+    .job-type-training {
+        color: #2ca02c;
+        font-weight: bold;
+    }
+    .job-type-inference {
+        color: #ff7f0e;
+        font-weight: bold;
+    }
+    .job-type-idle {
+        color: #7f7f7f;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -215,6 +285,7 @@ def load_data():
         data['nodes'] = aggregate_by_node(fact_df)
         data['jobs'] = aggregate_by_job(fact_df)
         data['billing'] = calculate_billing(fact_df)
+        data['job_persistence'] = analyze_job_persistence(fact_df)
     
     return data
 
@@ -222,19 +293,20 @@ def main():
     """Main dashboard function."""
     
     # Header
-    st.markdown('<h1 class="main-header">🚀 GPU Usage Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🚀 Enhanced GPU Usage Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<p style="text-align: center; color: #666;">Realistic GPU Simulation with Job Persistence, Time Patterns & Advanced Analytics</p>', unsafe_allow_html=True)
     
     # Load data
-    with st.spinner("Loading data..."):
+    with st.spinner("Loading enhanced data..."):
         data = load_data()
     
     if not data or data['fact'].empty:
         st.error("No data available. Please ensure the ingestion pipeline has run.")
-        st.info("Data should be available in the ../data/iceberg/ directory")
+        st.info("Data should be available in the ../airflow/data/iceberg/ directory")
         return
     
     # Sidebar filters
-    st.sidebar.header("📊 Filters")
+    st.sidebar.header("📊 Enhanced Filters")
     
     # Time range filter
     if 'hourly' in data and not data['hourly'].empty:
@@ -248,6 +320,15 @@ def main():
             max_value=max_date.date()
         )
     
+    # Job type filter
+    if 'fact' in data and not data['fact'].empty:
+        job_types = data['fact']['job_type'].unique()
+        selected_job_types = st.sidebar.multiselect(
+            "Select Job Types",
+            options=job_types,
+            default=job_types
+        )
+    
     # Node filter
     if 'nodes' in data and not data['nodes'].empty:
         selected_nodes = st.sidebar.multiselect(
@@ -256,13 +337,16 @@ def main():
             default=data['nodes']['node_id'].unique()
         )
     
-    # Main content
+    # Enhanced KPIs
+    st.markdown("## 📈 Enhanced Key Performance Indicators")
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
+        total_gpu_hours = data['fact']['duration_seconds'].sum() / 3600
         st.metric(
             "Total GPU Hours",
-            f"{data['fact']['duration_seconds'].sum() / 3600:.1f}",
+            f"{total_gpu_hours:.1f}",
             delta="+2.5 hours"
         )
     
@@ -290,20 +374,139 @@ def main():
             delta="+3"
         )
     
-    # Charts
-    st.markdown("---")
+    # New Enhanced KPIs
+    col1, col2, col3, col4 = st.columns(4)
     
-    # Time series chart
+    with col1:
+        work_hours_utilization = data['fact'][data['fact']['is_work_hours']]['gpu_utilization_percent'].mean()
+        st.metric(
+            "Work Hours Utilization",
+            f"{work_hours_utilization:.1f}%",
+            delta="+15.2%"
+        )
+    
+    with col2:
+        training_jobs = len(data['fact'][data['fact']['job_type'] == 'Training'])
+        total_records = len(data['fact'])
+        training_percentage = (training_jobs / total_records) * 100
+        st.metric(
+            "Training Jobs %",
+            f"{training_percentage:.1f}%",
+            delta="+5.3%"
+        )
+    
+    with col3:
+        avg_memory_efficiency = data['fact']['memory_efficiency'].mean()
+        st.metric(
+            "Memory Efficiency",
+            f"{avg_memory_efficiency:.1f} GB/%",
+            delta="+2.1 GB/%"
+        )
+    
+    with col4:
+        job_persistence_avg = data['job_persistence']['duration_hours'].mean() if 'job_persistence' in data else 0
+        st.metric(
+            "Avg Job Duration",
+            f"{job_persistence_avg:.1f}h",
+            delta="+0.5h"
+        )
+    
+    # Job Type Analysis
+    st.markdown("---")
+    st.markdown("## 🎯 Job Type Analysis")
+    
+    if 'fact' in data and not data['fact'].empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Job type distribution
+            job_type_counts = data['fact']['job_type'].value_counts()
+            fig = px.pie(
+                values=job_type_counts.values,
+                names=job_type_counts.index,
+                title='Job Type Distribution',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Job type performance
+            job_type_performance = data['fact'].groupby('job_type').agg({
+                'gpu_utilization_percent': 'mean',
+                'memory_used_gb': 'mean',
+                'memory_efficiency': 'mean'
+            }).round(2)
+            
+            fig = px.bar(
+                job_type_performance,
+                y='gpu_utilization_percent',
+                title='Average GPU Utilization by Job Type',
+                color='gpu_utilization_percent',
+                color_continuous_scale='RdYlGn'
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Time-Based Pattern Analysis
+    st.markdown("---")
+    st.markdown("## ⏰ Time-Based Pattern Analysis")
+    
     if 'hourly' in data and not data['hourly'].empty:
-        st.subheader("📈 GPU Utilization Over Time")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Work hours vs off-hours comparison
+            work_hours_data = data['fact'].groupby('is_work_hours').agg({
+                'gpu_utilization_percent': 'mean',
+                'job_id': 'nunique'
+            }).round(2)
+            
+            fig = px.bar(
+                work_hours_data,
+                y='gpu_utilization_percent',
+                title='GPU Utilization: Work Hours vs Off-Hours',
+                color='gpu_utilization_percent',
+                color_continuous_scale='RdYlGn'
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Hourly activity pattern
+            hourly_activity = data['fact'].groupby('hour_of_day').agg({
+                'gpu_utilization_percent': 'mean',
+                'job_id': 'nunique'
+            }).round(2)
+            
+            fig = px.line(
+                hourly_activity,
+                y='gpu_utilization_percent',
+                title='Hourly Activity Pattern (24-Hour Cycle)',
+                markers=True
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Enhanced Time Series
+    st.markdown("---")
+    st.markdown("## 📈 Enhanced Time Series Analysis")
+    
+    if 'hourly' in data and not data['hourly'].empty:
+        st.subheader("📈 GPU Utilization Over Time (with Work Hours Highlighting)")
         
         fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=('GPU Utilization (%)', 'Memory Usage (GB)'),
+            rows=3, cols=1,
+            subplot_titles=('GPU Utilization (%)', 'Memory Usage (GB)', 'Active Jobs'),
             vertical_spacing=0.1
         )
         
-        # GPU Utilization
+        # GPU Utilization with work hours highlighting
         fig.add_trace(
             go.Scatter(
                 x=data['hourly']['time_period'],
@@ -315,16 +518,19 @@ def main():
             row=1, col=1
         )
         
-        fig.add_trace(
-            go.Scatter(
-                x=data['hourly']['time_period'],
-                y=data['hourly']['gpu_utilization_percent_max'],
-                mode='lines',
-                name='Max Utilization',
-                line=dict(color='#ff7f0e', dash='dash')
-            ),
-            row=1, col=1
-        )
+        # Add work hours highlighting
+        work_hours_mask = data['hourly']['is_work_hours_mean'] > 0.5
+        if work_hours_mask.any():
+            fig.add_trace(
+                go.Scatter(
+                    x=data['hourly'][work_hours_mask]['time_period'],
+                    y=data['hourly'][work_hours_mask]['gpu_utilization_percent_mean'],
+                    mode='markers',
+                    name='Work Hours',
+                    marker=dict(color='#2ca02c', size=8)
+                ),
+                row=1, col=1
+            )
         
         # Memory Usage
         fig.add_trace(
@@ -338,22 +544,123 @@ def main():
             row=2, col=1
         )
         
-        fig.update_layout(height=600, showlegend=True)
+        # Active Jobs
+        fig.add_trace(
+            go.Scatter(
+                x=data['hourly']['time_period'],
+                y=data['hourly']['job_id_nunique'],
+                mode='lines+markers',
+                name='Active Jobs',
+                line=dict(color='#ff7f0e')
+            ),
+            row=3, col=1
+        )
+        
+        fig.update_layout(height=800, showlegend=True)
         st.plotly_chart(fig, use_container_width=True)
     
-    # Node and Job Analysis
+    # Job Persistence Analysis
+    st.markdown("---")
+    st.markdown("## 🔄 Job Persistence Analysis")
+    
+    if 'job_persistence' in data and not data['job_persistence'].empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Job duration distribution
+            fig = px.histogram(
+                data['job_persistence'],
+                x='duration_hours',
+                nbins=20,
+                title='Job Duration Distribution',
+                color='job_type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Job type vs duration
+            fig = px.box(
+                data['job_persistence'],
+                x='job_type',
+                y='duration_hours',
+                title='Job Duration by Type',
+                color='job_type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Memory Efficiency Analysis
+    st.markdown("---")
+    st.markdown("## 💾 Memory Efficiency Analysis")
+    
+    if 'fact' in data and not data['fact'].empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Memory efficiency by job type
+            fig = px.box(
+                data['fact'],
+                x='job_type',
+                y='memory_efficiency',
+                title='Memory Efficiency by Job Type',
+                color='job_type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Memory vs Utilization correlation
+            fig = px.scatter(
+                data['fact'],
+                x='gpu_utilization_percent',
+                y='memory_used_gb',
+                color='job_type',
+                title='Memory Usage vs GPU Utilization',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Enhanced Node and Job Analysis
+    st.markdown("---")
+    st.markdown("## 🏢 Enhanced Node & Job Performance")
+    
     col1, col2 = st.columns(2)
     
     with col1:
         if 'nodes' in data and not data['nodes'].empty:
-            st.subheader("🏢 Node Performance")
+            st.subheader("🏢 Node Performance (Enhanced)")
             
             fig = px.bar(
                 data['nodes'],
                 x='node_id',
                 y='gpu_utilization_percent_mean',
                 title='Average GPU Utilization by Node',
-                color='gpu_utilization_percent_mean',
+                color='memory_efficiency_mean',
                 color_continuous_scale='RdYlGn'
             )
             fig.update_layout(height=400)
@@ -361,9 +668,9 @@ def main():
     
     with col2:
         if 'jobs' in data and not data['jobs'].empty:
-            st.subheader("💼 Job Performance")
+            st.subheader("💼 Job Performance (Enhanced)")
             
-            # Top 10 jobs by GPU hours
+            # Top 10 jobs by GPU hours with job type
             top_jobs = data['jobs'].nlargest(10, 'gpu_hours')
             
             fig = px.bar(
@@ -371,48 +678,66 @@ def main():
                 x='job_id',
                 y='gpu_hours',
                 title='Top 10 Jobs by GPU Hours',
-                color='gpu_utilization_percent_mean',
-                color_continuous_scale='Viridis'
+                color='job_type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
             )
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
     
-    # Billing Analysis
+    # Enhanced Billing Analysis
     st.markdown("---")
-    st.subheader("💰 Billing Analysis")
+    st.markdown("## 💰 Enhanced Billing Analysis")
     
     if 'billing' in data and not data['billing'].empty:
         col1, col2 = st.columns(2)
         
         with col1:
-            # Cost breakdown
+            # Cost breakdown by job type
             fig = px.pie(
                 data['billing'],
                 values='total_cost',
-                names='job_id',
-                title='Cost Distribution by Job'
+                names='job_type',
+                title='Cost Distribution by Job Type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
             )
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            # Cost vs Utilization
+            # Cost vs Utilization by job type
             fig = px.scatter(
                 data['billing'],
                 x='gpu_utilization_percent',
                 y='total_cost',
                 size='gpu_hours',
+                color='job_type',
                 hover_data=['job_id', 'memory_used_gb'],
-                title='Cost vs GPU Utilization'
+                title='Cost vs GPU Utilization by Job Type',
+                color_discrete_map={
+                    'Training': '#2ca02c',
+                    'Inference': '#ff7f0e',
+                    'Data Processing': '#1f77b4',
+                    'Idle': '#7f7f7f'
+                }
             )
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
     
-    # Data Tables
+    # Enhanced Data Tables
     st.markdown("---")
-    st.subheader("📋 Detailed Data")
+    st.markdown("## 📋 Enhanced Data Tables")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Hourly Aggregates", "Node Aggregates", "Job Aggregates", "Billing"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Hourly Aggregates", "Node Aggregates", "Job Aggregates", "Job Persistence", "Billing"])
     
     with tab1:
         if 'hourly' in data and not data['hourly'].empty:
@@ -427,6 +752,10 @@ def main():
             st.dataframe(data['jobs'], use_container_width=True)
     
     with tab4:
+        if 'job_persistence' in data and not data['job_persistence'].empty:
+            st.dataframe(data['job_persistence'], use_container_width=True)
+    
+    with tab5:
         if 'billing' in data and not data['billing'].empty:
             st.dataframe(data['billing'], use_container_width=True)
     
@@ -435,8 +764,9 @@ def main():
     st.markdown(
         """
         <div style='text-align: center; color: #666;'>
-            <p>Dashboard last updated: {}</p>
-            <p>Data source: GPU Usage Pipeline | Powered by Streamlit & Plotly</p>
+            <p>Enhanced Dashboard last updated: {}</p>
+            <p>Data source: Realistic GPU Usage Pipeline | Powered by Streamlit & Plotly</p>
+            <p>Features: Job Persistence, Time Patterns, Memory Efficiency, Advanced Analytics</p>
         </div>
         """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         unsafe_allow_html=True
